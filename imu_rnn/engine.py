@@ -59,9 +59,11 @@ def train_epoch(model, loader, optimizer, device, progress=None):
         total_loss += float(loss.detach()) * n
         correct += int((logits.argmax(1) == y).sum())
         count += n
-        if progress and (step % 100 == 0 or step == len(loader)):
+        if progress:
             progress(dict(step=step, total_steps=len(loader), samples=count,
-                          loss=total_loss/count, elapsed_seconds=time.monotonic()-started))
+                          loss=total_loss/count, batch_loss=float(loss.detach()),
+                          accuracy=correct/count, lr=optimizer.param_groups[0]['lr'],
+                          elapsed_seconds=time.monotonic()-started))
     if not count:
         raise ValueError('Empty training loader')
     return dict(loss=total_loss/count, accuracy=correct/count, n=count,
@@ -96,7 +98,7 @@ def evaluate(model, loader, device):
 
 
 @torch.inference_mode()
-def evaluate_dataset(model, dataset, device, batch_size=128):
+def evaluate_dataset(model, dataset, device, batch_size=128, progress=None, diagnostics=None):
     """Encode each needed window once with frozen BN; reuse only within this call.
 
     Equivalent to ordinary eval, never used for gradient training. The feature
@@ -104,6 +106,7 @@ def evaluate_dataset(model, dataset, device, batch_size=128):
     """
     from .data import load_window
     model.eval()
+    started = time.monotonic()
     contexts = [dataset.context_indices(i) for i in range(len(dataset))]
     needed = sorted({i for context in contexts for i in context})
     feature_cache = {}
@@ -114,15 +117,28 @@ def evaluate_dataset(model, dataset, device, batch_size=128):
         windows = torch.stack([(load_window(dataset.records[i]['path'])-mean)/std for i in indices])
         encoded = model.encode_windows(windows.to(device)).cpu()
         feature_cache.update(zip(indices, encoded))
+        if progress:
+            progress(dict(phase='encode', completed=start+len(indices), total=len(needed)))
     rows = []
+    total_loss, correct = 0., 0
     for start in range(0, len(contexts), batch_size):
         chunk = contexts[start:start+batch_size]
         sequences = [torch.stack([feature_cache[i] for i in context]) for context in chunk]
         lengths = torch.tensor([len(s) for s in sequences])
         features = torch.nn.utils.rnn.pad_sequence(sequences, batch_first=True).to(device)
-        probabilities = model.classify_features(features, lengths).softmax(1).cpu().numpy()
+        logits = model.classify_features(features, lengths)
+        probabilities = logits.softmax(1).cpu().numpy()
         metadata = [dataset.records[c[-1]] for c in chunk]
+        labels = torch.tensor([r['label'] for r in metadata], device=device)
+        total_loss += float(torch.nn.functional.cross_entropy(logits, labels, reduction='sum'))
+        correct += int((logits.argmax(1) == labels).sum())
         rows.extend(prediction_rows(probabilities, [r['label'] for r in metadata], metadata))
+        if progress:
+            progress(dict(phase='predict', completed=len(rows), total=len(dataset),
+                          loss=total_loss/len(rows), accuracy=correct/len(rows)))
     if len(rows) != len(dataset):
         raise RuntimeError('Prediction count differs from target count')
-    return rows, metrics_for_rows(rows)
+    metrics = metrics_for_rows(rows)
+    if diagnostics is not None:
+        diagnostics.update(loss=total_loss/len(rows), seconds=time.monotonic()-started)
+    return rows, metrics

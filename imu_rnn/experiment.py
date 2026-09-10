@@ -19,6 +19,7 @@ from .data import (build_index, split_subjects, fit_normalizer, WindowDataset,
 from .engine import seed_everything, BestTracker, train_epoch, evaluate_dataset, metrics_for_rows
 from .io import save_json, write_predictions, read_predictions
 from .model import CNNRNN
+from .console import ConsoleProgress, evaluate_with_progress, print_epoch, print_metrics, format_score
 
 
 @dataclass
@@ -87,6 +88,10 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
     for part, rows in records.items():
         chosen = evenly_spaced_indices(rows, 8 if part == 'train' else 32) if config.smoke else None
         datasets[part] = WindowDataset(rows, normalizer, config.seq_len, chosen)
+    print(f'Train subjects: {", ".join(split["train"])}\n'
+          f'Validation: {split["val"][0]} | Test: {subject}\n'
+          f'Target windows: Train={len(datasets["train"])} Val={len(datasets["val"])} '
+          f'Test={len(datasets["test"])}', flush=True)
     save_json(fold_dir/'split.json', split)
     save_json(fold_dir/'normalizer.json', normalizer)
     loader = DataLoader(datasets['train'], batch_size=config.batch_size, shuffle=True,
@@ -96,15 +101,20 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     tracker, history = BestTracker(config.patience), []
     started = time.monotonic()
-    for epoch in range(1, (1 if config.smoke else config.epochs)+1):
-        def progress(details):
-            save_json(output/'status.json', dict(state='training', subject=subject, epoch=epoch,
-                      updated=datetime.now(timezone.utc).isoformat(), **details))
-            print(f'{subject} epoch {epoch} step {details["step"]}/{details["total_steps"]} '
-                  f'loss={details["loss"]:.5f} seconds={details["elapsed_seconds"]:.1f}', flush=True)
-        train = train_epoch(model, loader, optimizer, device, progress)
+    maximum = 1 if config.smoke else config.epochs
+    for epoch in range(1, maximum+1):
+        with ConsoleProgress(f'{subject} Train Epoch {epoch}/{maximum}', len(loader)) as bar:
+            def progress(details):
+                bar.update(details['step'], batch_loss=details['batch_loss'],
+                           avg_loss=details['loss'], acc=details['accuracy'], lr=details['lr'])
+                # Console updates per batch, disk status stays inexpensive.
+                if details['step'] == 1 or details['step'] % 100 == 0 or details['step'] == details['total_steps']:
+                    save_json(output/'status.json', dict(state='training', subject=subject, epoch=epoch,
+                              updated=datetime.now(timezone.utc).isoformat(), **details))
+            train = train_epoch(model, loader, optimizer, device, progress)
         save_json(output/'status.json', dict(state='validating', subject=subject, epoch=epoch))
-        _, val = evaluate_dataset(model, datasets['val'], device)
+        _, val, val_diagnostics = evaluate_with_progress(model, datasets['val'], device, 'Validation')
+        val['loss'] = val_diagnostics['loss']
         improved = tracker.update(val['macro_f1'], epoch)
         if improved:
             checkpoint = dict(model_state=model.state_dict(), normalizer=normalizer,
@@ -116,16 +126,19 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
             os.replace(fold_dir/'best.pt.tmp', fold_dir/'best.pt')
         history.append(dict(epoch=epoch, train=train, validation=val, best=improved))
         save_json(fold_dir/'history.json', history)
-        print(f'{subject} epoch {epoch}: val_macro_f1={val["macro_f1"]:.5f} '
-              f'best_epoch={tracker.best_epoch} stale={tracker.stale}', flush=True)
+        print_epoch(epoch, maximum, train, val, val['loss'], tracker.best_epoch,
+                    tracker.stale, tracker.patience, improved)
         if tracker.should_stop:
+            print(f'Early stopping: best epoch={tracker.best_epoch}, '
+                  f'validation Macro-F1={tracker.best:.4f}', flush=True)
             break
     checkpoint = torch.load(fold_dir/'best.pt', map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state'])
     save_json(output/'status.json', dict(state='testing_best_checkpoint', subject=subject,
                                        best_epoch=tracker.best_epoch))
     # This is the ONLY use of test predictions in a fold.
-    rows, metrics = evaluate_dataset(model, datasets['test'], device)
+    print(f'Restored best epoch {tracker.best_epoch}; evaluating test subject {subject}', flush=True)
+    rows, metrics, _ = evaluate_with_progress(model, datasets['test'], device, 'Test')
     expected = {(r['subject'], r['id']) for r in records['test']}
     if not config.smoke and {(r['subject'], r['id']) for r in rows} != expected:
         raise RuntimeError('Test predictions do not cover every unique target')
@@ -136,8 +149,7 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
                   target_counts={k: len(v) for k, v in datasets.items()},
                   fingerprint=fingerprint, complete=True, smoke=config.smoke)
     save_json(fold_dir/'result.json', result)
-    print(f'Completed {subject}: test_accuracy={metrics["accuracy"]:.5f} '
-          f'test_macro_f1={metrics["macro_f1"]:.5f}', flush=True)
+    print_metrics(f'Completed test subject: {subject}', metrics)
     return result
 
 
@@ -183,6 +195,10 @@ def run_experiment(config):
     if output.exists() and any(output.iterdir()) and not config.resume:
         raise ValueError('Output directory is nonempty; use a new directory or --resume')
     output.mkdir(parents=True, exist_ok=True)
+    print(f'Device: {device} | Batch size: {config.batch_size} | Sequence length: {config.seq_len}\n'
+          f'Max epochs: {1 if config.smoke else config.epochs} | LR: {config.lr} | Seed: {config.seed}\n'
+          f'Data: {Path(config.data_root).resolve()}\nOutput: {output}\n'
+          'Preparing data: validating hashes and window cache...', flush=True)
     save_json(output/'status.json', dict(state='indexing', started=datetime.now(timezone.utc).isoformat()))
     try:
         index = build_index(Path(config.data_root), Path(config.cache_dir))
@@ -208,7 +224,9 @@ def run_experiment(config):
             save_json(output/'manifest.json', manifest)
         prepare_window_store(index, Path(config.cache_dir))
         folds = []
-        for subject in subjects:
+        for fold_number, subject in enumerate(subjects, 1):
+            print(f'\n{"="*60}\nFold {fold_number}/{len(subjects)} | Test subject: {subject}\n'
+                  f'{"="*60}', flush=True)
             result_file = output/subject/'result.json'
             if config.resume and result_file.exists():
                 result = json.loads(result_file.read_text(encoding='utf-8'))
@@ -226,6 +244,10 @@ def run_experiment(config):
             summary = summarize(folds, output, subjects, config.smoke)
         save_json(output/'status.json', dict(state='complete', folds=len(folds), smoke=config.smoke,
                                            finished=datetime.now(timezone.utc).isoformat()))
+        print(f'\nCompleted {len(folds)} folds. Fold mean +/- std:', flush=True)
+        for name, stats in summary['between_folds'].items():
+            print(f'{name}: {format_score(stats["mean"])} +/- {format_score(stats["std"])} (n={stats["n"]})')
+        print_metrics('Pooled evaluation across completed folds', summary['pooled'])
         return summary
     except BaseException as exc:
         save_json(output/'status.json', dict(state='failed', error=f'{type(exc).__name__}: {exc}',

@@ -40,6 +40,27 @@ def test_cached_eval_matches_window_eval(tmp_path):
                                [[r[f'p{i}'] for i in range(4)] for r in fast_rows], atol=1e-6)
 
 
+def test_evaluation_progress_and_loss_cover_all_targets(tmp_path):
+    torch.set_num_threads(2)
+    fixture_data(tmp_path/'data')
+    index = build_index(tmp_path/'data', tmp_path/'cache')
+    dataset = WindowDataset(index['a'], fit_normalizer(index['b']), seq_len=3)
+    model = CNNRNN().eval()
+    expected_loss = 0.
+    with torch.no_grad():
+        for x, lengths, y, _ in torch.utils.data.DataLoader(dataset, batch_size=2, collate_fn=collate_sequences):
+            expected_loss += float(torch.nn.functional.cross_entropy(model(x, lengths), y, reduction='sum'))
+    updates, diagnostics = [], {}
+    rows, metrics = evaluate_dataset(model, dataset, torch.device('cpu'), batch_size=2,
+                                     progress=updates.append, diagnostics=diagnostics)
+    assert diagnostics['loss'] == pytest.approx(expected_loss/3, abs=1e-6)
+    assert [(u['phase'], u['completed']) for u in updates] == [
+        ('encode', 2), ('encode', 3), ('predict', 2), ('predict', 3)]
+    assert all(u['total'] == 3 for u in updates)
+    assert updates[-1]['accuracy'] == metrics['accuracy']
+    assert len(rows) == 3
+
+
 def test_full_synthetic_loso_artifacts_resume_and_independent_inference(tmp_path):
     torch.set_num_threads(2)
     fixture_data(tmp_path/'data')

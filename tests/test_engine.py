@@ -50,3 +50,22 @@ def test_evaluation_rejects_repeated_targets():
     b = batch()
     with pytest.raises(ValueError, match='Duplicate'):
         evaluate(CNNRNN(), [b, b], torch.device('cpu'))
+
+
+def test_training_reports_every_batch_with_sample_weighted_metrics():
+    torch.set_num_threads(2)
+    seed_everything(42)
+    model = CNNRNN()
+    batches = [batch(), batch()]
+    # Unequal final batch catches an unweighted average of batch accuracies/losses.
+    batches[1] = tuple(v[:1] for v in batches[1])
+    updates = []
+    result = train_epoch(model, batches, torch.optim.Adam(model.parameters()),
+                         torch.device('cpu'), progress=updates.append)
+    assert [u['step'] for u in updates] == [1, 2]
+    assert updates[-1]['samples'] == 3
+    assert updates[-1]['accuracy'] == result['accuracy']
+    assert updates[-1]['loss'] == result['loss']
+    assert updates[-1]['loss'] == pytest.approx(
+        (updates[0]['batch_loss'] * 2 + updates[1]['batch_loss']) / 3)
+    assert updates[-1]['lr'] == .001
