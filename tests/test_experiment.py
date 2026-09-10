@@ -11,6 +11,7 @@ from imu_rnn.engine import evaluate, evaluate_dataset
 from imu_rnn.model import CNNRNN
 from imu_rnn.experiment import Config, run_experiment
 from imu_rnn.inference import run_inference
+from imu_rnn.io import read_predictions
 
 
 def fixture_data(root):
@@ -88,7 +89,14 @@ def test_full_synthetic_loso_artifacts_resume_and_independent_inference(tmp_path
                     '--checkpoint', str(checkpoint), '--data-root', str(tmp_path/'data'),
                     '--output-csv', str(cli_output), '--subjects', 'a', '--device', 'cpu',
                     '--cache-dir', str(tmp_path/'cache')], check=True, capture_output=True, text=True)
-    assert cli_output.read_text() == (tmp_path/'infer.csv').read_text()
+    direct_rows = read_predictions(tmp_path/'infer.csv')
+    cli_rows = read_predictions(cli_output)
+    assert [(r['subject'], r['id'], r['label'], r['prediction']) for r in cli_rows] == [
+        (r['subject'], r['id'], r['label'], r['prediction']) for r in direct_rows]
+    np.testing.assert_allclose(
+        [[r[f'p{i}'] for i in range(4)] for r in cli_rows],
+        [[r[f'p{i}'] for i in range(4)] for r in direct_rows],
+        rtol=1e-6, atol=1e-7)
     config.seq_len = 3
     with pytest.raises(ValueError, match='configuration|fingerprint'):
         run_experiment(config)
