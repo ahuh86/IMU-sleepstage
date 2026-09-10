@@ -27,3 +27,4 @@
 - 真实 GPU 冒烟完成：11 名训练者各 8 个目标、验证/测试各 32 个目标；训练 1 轮，成功恢复最佳权重并保存预测。结果仅用于流程检查。
 - 独立代码审查未发现阻断问题。审查提及原始长度统计与修正长度输入的微小差异；保留原始采样统计口径并在 README 明确记录。
 - 完整 13 折 GPU 实验已按用户要求停止，停在第一折 LIHongmei 的第 5 轮；前 4 轮历史与最佳权重保留。尚未完成正式测试折。进程信息在 results/logs/loso-process.json，状态记录为 stopped_by_user；需要继续时按 README 的 --resume 命令重跑未完成折。
+- 2026-09-10 参照同工作区 DeepSleepNet 增加 tqdm 逐 batch/验证/测试实时进度、每轮训练与验证汇总、逐类指标表和混淆矩阵；补充 Balanced Accuracy 与 Specificity。

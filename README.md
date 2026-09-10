@@ -10,14 +10,16 @@
 python -m pytest -q
 python train_loso.py --smoke --device cuda --output-dir results/smoke_gpu
 python train_loso.py --test-subject LIHongmei --device cuda --output-dir results/single
-python train_loso.py --all-subjects --device cuda --output-dir results/loso
-python train_loso.py --all-subjects --device cuda --output-dir results/loso --resume
+python -u train_loso.py --all-subjects --device cuda --output-dir results/loso_live
+python -u train_loso.py --all-subjects --device cuda --output-dir results/loso_live --resume
 python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../split-data --subjects LIHongmei --output-csv results/inference.csv --device cuda
 ```
 
 `--data-root` 默认指向相邻 `split-data`，不依赖调用时的相对目录。首次全量运行会检查并哈希所有窗口，建立约 3.5 GB 的 float32 磁盘映射缓存。`--cache-dir` 默认 `results/cache`。缓存写入本项目，不修改源数据。空间紧张时可在没有运行训练的情况下删除派生缓存，下一次会重建。
 
 `--smoke` 默认选择排序后第一人测试，只训练一轮；从每位训练者整晚等距选 8 个目标，验证、测试各最多 32 个目标。归一化仍仅使用全部训练受试者。也可同时指定 `--all-subjects` 检查所有折。冒烟结果仅验证流程，不能用作正式性能结论。
+
+训练控制台参照同工作区 DeepSleepNet 的显示方式：每个 batch 通过 `tqdm` 动态更新当前/平均 loss、累计准确率、学习率、速度和预计剩余时间；验证与测试分别显示窗口编码和预测进度。每轮结束打印训练 Loss/Accuracy、验证 Loss/Accuracy/Balanced Accuracy/Macro-F1/Kappa、最佳轮次与早停计数。每折测试完成后打印各阶段 Precision、Recall（Sensitivity）、Specificity、F1、Support 和混淆矩阵；全部折结束再显示折间均值与合并指标。建议通过 `python -u` 运行，确保 PowerShell 及时刷新输出。
 
 ## 数据与时序协议
 
@@ -47,6 +49,6 @@ python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../spl
 - `status.json`：当前折、轮次、训练步骤或完成/失败状态；`summary.json`、`REPORT.md`：逐折与合并结果，训练期间逐折更新。
 - 每折目录：`split.json`、`normalizer.json`、`history.json`、`best.pt`、`predictions.csv`、`result.json`。
 - CSV 包含受试者、窗口编号、首末采样时间、真实标签、预测类别及 `p0`–`p3`。`end` 是最后一个原始采样点时间，不是半开窗口右端点。
-- 固定四类计算 Accuracy、Macro-F1、Cohen κ、每类 Precision/Recall/F1/支持数及混淆矩阵（行真值、列预测）。缺失类 F1 为 0；κ 分母为 0 时记 null。折间统计采用总体标准差，κ 忽略不可定义折并报告有效折数。合并指标从所有逐窗口预测重新计算。
+- 固定四类计算 Accuracy、Balanced Accuracy、Macro-F1、Cohen κ、每类 Precision/Recall（Sensitivity）/Specificity/F1/支持数及混淆矩阵（行真值、列预测）。固定四类平均时缺失类 Recall/F1 为 0；κ 分母为 0 时记 null。折间统计采用总体标准差，κ 忽略不可定义折并报告有效折数。合并指标从所有逐窗口预测重新计算。
 
 数据、缓存、模型和运行结果都在 Git 忽略规则内；不自动提交训练数据。当前仓库位于父级 Git 仓库内，保持该结构。

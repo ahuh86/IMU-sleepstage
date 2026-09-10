@@ -16,10 +16,15 @@ def classification_metrics(truth, prediction):
     tp = cm.diagonal()
     precision = np.divide(tp, predicted, out=np.zeros(4), where=predicted != 0)
     recall = np.divide(tp, support, out=np.zeros(4), where=support != 0)
+    true_negative = y.size - support - predicted + tp
+    specificity = np.divide(true_negative, true_negative + predicted - tp,
+                            out=np.zeros(4), where=(true_negative + predicted - tp) != 0)
     f1 = np.divide(2 * tp, support + predicted, out=np.zeros(4), where=(support + predicted) != 0)
     accuracy = float(tp.sum() / y.size)
     chance = float(np.dot(support.astype(float), predicted) / y.size ** 2)
     kappa = float((accuracy - chance) / (1 - chance)) if chance < 1 else None
-    return dict(accuracy=accuracy, macro_f1=float(f1.mean()), kappa=kappa,
-                precision=precision.tolist(), recall=recall.tolist(), f1=f1.tolist(),
+    return dict(accuracy=accuracy, balanced_accuracy=float(recall.mean()),
+                macro_f1=float(f1.mean()), kappa=kappa,
+                precision=precision.tolist(), recall=recall.tolist(),
+                specificity=specificity.tolist(), f1=f1.tolist(),
                 support=support.tolist(), confusion_matrix=cm.tolist(), n=int(y.size))

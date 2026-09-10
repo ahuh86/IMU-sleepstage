@@ -156,7 +156,7 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
 def summarize(folds, output, subjects, smoke):
     rows = [row for fold in folds for row in read_predictions(output/fold['test_subject']/'predictions.csv')]
     between = {}
-    for metric in ('accuracy', 'macro_f1', 'kappa'):
+    for metric in ('accuracy', 'balanced_accuracy', 'macro_f1', 'kappa'):
         values = [f['metrics'][metric] for f in folds if f['metrics'][metric] is not None]
         between[metric] = dict(mean=float(np.mean(values)) if values else None,
                                std=float(np.std(values)) if values else None, n=len(values))

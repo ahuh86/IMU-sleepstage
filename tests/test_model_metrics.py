@@ -53,6 +53,8 @@ def test_metrics_fixed_four_classes_and_missing_class():
     assert m['kappa'] == pytest.approx(7 / 11)
     assert m['support'] == [2, 1, 1, 0]
     assert m['recall'] == [.5, 1., 1., 0.]
+    assert m['balanced_accuracy'] == pytest.approx(0.625)
+    assert m['specificity'] == pytest.approx([1., 2/3, 1., 1.])
     assert np.array(m['confusion_matrix']).shape == (4, 4)
 
 
