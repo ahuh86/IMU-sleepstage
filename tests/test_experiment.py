@@ -26,6 +26,19 @@ def fixture_data(root):
             np.save(folder / f'npy_{i+1}.npy', a)
 
 
+def fixture_class_weight_data(root):
+    labels = {'a': [0, 0, 0, 0], 'b': [1, 1, 1, 1], 'c': [0, 1, 2, 3]}
+    for subject, subject_labels in labels.items():
+        folder = root / subject / '10s-step'
+        folder.mkdir(parents=True)
+        for i, label in enumerate(subject_labels):
+            a = np.zeros((3750, 8))
+            a[:, 0] = np.arange(3750) * .008 + i * 10
+            a[:, 1:7] = np.sin(np.arange(3750)[:, None] * .02) + ord(subject) - 97
+            a[:, 7] = label
+            np.save(folder / f'npy_{i+1}.npy', a)
+
+
 def test_cached_eval_matches_window_eval(tmp_path):
     torch.set_num_threads(2)
     fixture_data(tmp_path/'data')
@@ -106,3 +119,34 @@ def test_invalid_config_does_not_start_run(tmp_path):
     with pytest.raises(ValueError):
         run_experiment(Config(data_root=str(tmp_path), output_dir=str(tmp_path/'out'), epochs=0))
     assert not (tmp_path/'out').exists()
+
+
+def test_weighted_fold_records_training_only_distribution(tmp_path):
+    torch.set_num_threads(2)
+    fixture_class_weight_data(tmp_path/'data')
+    config = Config(
+        data_root=str(tmp_path/'data'), output_dir=str(tmp_path/'run'),
+        cache_dir=str(tmp_path/'cache'), test_subject='a', epochs=1,
+        batch_size=2, seq_len=2, device='cpu', use_class_weight=True,
+    )
+
+    summary = run_experiment(config)
+
+    expected = {
+        'strategy': 'inverse_frequency_class_weight',
+        'formula': 'N / (4 * class_count)',
+        'class_order': ['Wake', 'Light', 'Deep', 'REM'],
+        'class_counts': [1, 1, 1, 1],
+        'class_weights': [1., 1., 1., 1.],
+        'source': 'complete training-subject records only',
+    }
+    saved = json.loads((tmp_path/'run'/'a'/'training_distribution.json').read_text())
+    checkpoint = torch.load(tmp_path/'run'/'a'/'best.pt', map_location='cpu', weights_only=True)
+    assert saved == expected
+    assert checkpoint['imbalance'] == expected
+    assert summary['folds'][0]['imbalance'] == expected
+    assert summary['folds'][0]['split'] == {'train': ['c'], 'val': ['b'], 'test': ['a']}
+    (tmp_path/'run'/'a'/'training_distribution.json').unlink()
+    config.resume = True
+    with pytest.raises(ValueError, match='training distribution'):
+        run_experiment(config)

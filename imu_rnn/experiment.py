@@ -19,6 +19,7 @@ from .data import (build_index, split_subjects, fit_normalizer, WindowDataset,
 from .engine import seed_everything, BestTracker, train_epoch, evaluate_dataset, metrics_for_rows
 from .io import save_json, write_predictions, read_predictions
 from .model import CNNRNN
+from .imbalance import class_counts, inverse_frequency_weights
 from .console import ConsoleProgress, evaluate_with_progress, print_epoch, print_metrics, format_score
 
 
@@ -40,6 +41,7 @@ class Config:
     num_workers: int = 0
     threads: int = 2
     resume: bool = False
+    use_class_weight: bool = False
 
     def validate(self):
         for field in ('epochs', 'batch_size', 'seq_len', 'patience', 'threads'):
@@ -84,6 +86,16 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
     split = split_subjects(index, subject)
     records = {part: [r for s in names for r in index[s]] for part, names in split.items()}
     normalizer = fit_normalizer(records['train'])
+    counts = class_counts(records['train'])
+    weights = inverse_frequency_weights(counts) if config.use_class_weight else None
+    loss_setup = dict(
+        strategy='inverse_frequency_class_weight' if config.use_class_weight else 'none',
+        formula='N / (4 * class_count)',
+        class_order=['Wake', 'Light', 'Deep', 'REM'],
+        class_counts=counts,
+        class_weights=weights.tolist() if weights is not None else None,
+        source='complete training-subject records only',
+    )
     datasets = {}
     for part, rows in records.items():
         chosen = evenly_spaced_indices(rows, 8 if part == 'train' else 32) if config.smoke else None
@@ -94,11 +106,17 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
           f'Test={len(datasets["test"])}', flush=True)
     save_json(fold_dir/'split.json', split)
     save_json(fold_dir/'normalizer.json', normalizer)
+    save_json(fold_dir/'training_distribution.json', loss_setup)
+    print(f'Training class counts [Wake, Light, Deep, REM]: {counts}\n'
+          f'Loss: {"weighted cross-entropy" if weights is not None else "cross-entropy"}'
+          + (f' | Weights: {[round(value, 6) for value in weights.tolist()]}'
+             if weights is not None else ''), flush=True)
     loader = DataLoader(datasets['train'], batch_size=config.batch_size, shuffle=True,
                         num_workers=config.num_workers, collate_fn=collate_sequences,
                         generator=torch.Generator().manual_seed(config.seed))
     model = CNNRNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    criterion = torch.nn.CrossEntropyLoss(weight=weights.to(device) if weights is not None else None)
     tracker, history = BestTracker(config.patience), []
     started = time.monotonic()
     maximum = 1 if config.smoke else config.epochs
@@ -111,7 +129,7 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
                 if details['step'] == 1 or details['step'] % 100 == 0 or details['step'] == details['total_steps']:
                     save_json(output/'status.json', dict(state='training', subject=subject, epoch=epoch,
                               updated=datetime.now(timezone.utc).isoformat(), **details))
-            train = train_epoch(model, loader, optimizer, device, progress)
+            train = train_epoch(model, loader, optimizer, device, progress, criterion)
         save_json(output/'status.json', dict(state='validating', subject=subject, epoch=epoch))
         _, val, val_diagnostics = evaluate_with_progress(model, datasets['val'], device, 'Validation')
         val['loss'] = val_diagnostics['loss']
@@ -120,6 +138,7 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
             checkpoint = dict(model_state=model.state_dict(), normalizer=normalizer,
                               config=asdict(config), model_config={'feature_dim': 32, 'hidden_dim': 32},
                               split=split, epoch=epoch, validation_metrics=val,
+                              imbalance=loss_setup,
                               fingerprint=fingerprint, data_digest=data_digest,
                               environment=environment(device))
             torch.save(checkpoint, fold_dir/'best.pt.tmp')
@@ -147,6 +166,7 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
                   best_epoch=tracker.best_epoch, best_validation_macro_f1=tracker.best,
                   epochs_run=len(history), seconds=time.monotonic()-started,
                   target_counts={k: len(v) for k, v in datasets.items()},
+                  imbalance=loss_setup,
                   fingerprint=fingerprint, complete=True, smoke=config.smoke)
     save_json(fold_dir/'result.json', result)
     print_metrics(f'Completed test subject: {subject}', metrics)
@@ -197,6 +217,7 @@ def run_experiment(config):
     output.mkdir(parents=True, exist_ok=True)
     print(f'Device: {device} | Batch size: {config.batch_size} | Sequence length: {config.seq_len}\n'
           f'Max epochs: {1 if config.smoke else config.epochs} | LR: {config.lr} | Seed: {config.seed}\n'
+          f'Loss: {"training-fold inverse-frequency weighted cross-entropy" if config.use_class_weight else "cross-entropy"}\n'
           f'Data: {Path(config.data_root).resolve()}\nOutput: {output}\n'
           'Preparing data: validating hashes and window cache...', flush=True)
     save_json(output/'status.json', dict(state='indexing', started=datetime.now(timezone.utc).isoformat()))
@@ -232,11 +253,24 @@ def run_experiment(config):
                 result = json.loads(result_file.read_text(encoding='utf-8'))
                 if not result.get('complete') or result['fingerprint'] != fingerprint:
                     raise ValueError('Completed fold fingerprint mismatch')
+                checkpoint_file = output/subject/'best.pt'
+                distribution_file = output/subject/'training_distribution.json'
+                if not checkpoint_file.exists():
+                    raise ValueError('Completed fold has no checkpoint')
+                if not distribution_file.exists():
+                    raise ValueError('Completed fold training distribution is missing')
+                saved_distribution = json.loads(distribution_file.read_text(encoding='utf-8'))
+                saved_checkpoint = torch.load(checkpoint_file, map_location='cpu', weights_only=True)
+                if saved_checkpoint.get('fingerprint') != fingerprint:
+                    raise ValueError('Completed fold checkpoint fingerprint mismatch')
+                if saved_checkpoint.get('config', {}).get('use_class_weight') != config.use_class_weight:
+                    raise ValueError('Completed fold checkpoint loss configuration mismatch')
+                if (result.get('imbalance') != saved_distribution or
+                        saved_checkpoint.get('imbalance') != saved_distribution):
+                    raise ValueError('Completed fold training distribution mismatch')
                 saved_rows = read_predictions(output/subject/'predictions.csv')
                 if metrics_for_rows(saved_rows) != result['metrics']:
                     raise ValueError('Saved prediction metrics do not match completed fold')
-                if not (output/subject/'best.pt').exists():
-                    raise ValueError('Completed fold has no checkpoint')
                 print(f'Reusing completed fold {subject}', flush=True)
             else:
                 result = run_fold(config, index, subject, output, device, fingerprint, digest)

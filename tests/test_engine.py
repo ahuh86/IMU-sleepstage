@@ -69,3 +69,55 @@ def test_training_reports_every_batch_with_sample_weighted_metrics():
     assert updates[-1]['loss'] == pytest.approx(
         (updates[0]['batch_loss'] * 2 + updates[1]['batch_loss']) / 3)
     assert updates[-1]['lr'] == .001
+
+
+def test_training_uses_supplied_weighted_criterion():
+    class ConstantLogits(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.tensor([2., 1., 0., -1.]))
+
+        def forward(self, x, lengths):
+            return self.logits.expand(len(x), -1)
+
+    model = ConstantLogits()
+    labels = torch.tensor([0, 1])
+    training_batch = (torch.zeros(2, 1), torch.ones(2, dtype=torch.long), labels, [{}, {}])
+    criterion = torch.nn.CrossEntropyLoss(weight=torch.tensor([1., 8., 1., 1.]))
+    expected = float(criterion(model.logits.expand(2, -1), labels))
+
+    result = train_epoch(
+        model,
+        [training_batch],
+        torch.optim.SGD(model.parameters(), lr=0.),
+        torch.device('cpu'),
+        criterion=criterion,
+    )
+
+    assert result['loss'] == pytest.approx(expected)
+
+
+def test_weighted_epoch_loss_uses_sum_of_target_weights_across_batches():
+    class ConstantLogits(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.tensor([2., 1., 0., -1.]))
+
+        def forward(self, x, lengths):
+            return self.logits.expand(len(x), -1)
+
+    model = ConstantLogits()
+    criterion = torch.nn.CrossEntropyLoss(weight=torch.tensor([1., 8., 1., 1.]))
+    labels = torch.tensor([0, 0, 1])
+    batches = [
+        (torch.zeros(2, 1), torch.ones(2, dtype=torch.long), labels[:2], [{}, {}]),
+        (torch.zeros(1, 1), torch.ones(1, dtype=torch.long), labels[2:], [{}]),
+    ]
+    expected = float(criterion(model.logits.expand(3, -1), labels))
+
+    result = train_epoch(
+        model, batches, torch.optim.SGD(model.parameters(), lr=0.),
+        torch.device('cpu'), criterion=criterion,
+    )
+
+    assert result['loss'] == pytest.approx(expected)

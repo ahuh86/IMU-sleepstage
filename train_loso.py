@@ -12,6 +12,8 @@ def main():
     choice.add_argument('--all-subjects', action='store_true')
     parser.add_argument('--smoke', action='store_true', help='One epoch, whole-night spaced targets per subject')
     parser.add_argument('--resume', action='store_true', help='Reuse verified complete folds; restart an incomplete fold')
+    parser.add_argument('--use-class-weight', action='store_true',
+                        help='Weight cross-entropy by N/(4*class count), using training subjects only')
     parser.add_argument('--device', choices=['auto','cpu','cuda'], default=defaults.device)
     for field in ('epochs','batch_size','seq_len','patience','seed','num_workers','threads'):
         parser.add_argument('--'+field.replace('_','-'), type=int, default=getattr(defaults, field))

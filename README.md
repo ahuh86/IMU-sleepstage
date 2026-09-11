@@ -9,8 +9,10 @@
 ```powershell
 python -m pytest -q
 python train_loso.py --smoke --device cuda --output-dir results/smoke_gpu
+python train_loso.py --smoke --device cuda --use-class-weight --output-dir results/weighted_smoke_gpu
 python train_loso.py --test-subject LIHongmei --device cuda --output-dir results/single
 python -u train_loso.py --all-subjects --device cuda --output-dir results/loso_live
+python -u train_loso.py --all-subjects --device cuda --use-class-weight --output-dir results/loso_weighted
 python -u train_loso.py --all-subjects --device cuda --output-dir results/loso_live --resume
 python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../split-data --subjects LIHongmei --output-csv results/inference.csv --device cuda
 ```
@@ -35,7 +37,9 @@ python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../spl
 
 受试者名称采用 Python 默认区分大小写排序。每折一人测试，循环取排序后下一人为验证，其余人训练；13 人数据为 11/1/1。每折保存明确划分。
 
-归一化仅使用该折训练受试者的通道均值和标准差；标准差小于 `1e-8` 的通道使用 1。所有训练目标每轮遍历一次，随机打乱；不做前缀截取、类别权重或均衡采样。
+归一化仅使用该折训练受试者的通道均值和标准差；标准差小于 `1e-8` 的通道使用 1。所有训练目标每轮遍历一次，随机打乱；不做前缀截取或均衡采样。
+
+性能优先配置使用 `--use-class-weight` 开启按折类别加权交叉熵。权重只由该折完整训练受试者统计，公式为 `N / (4 * n_c)`；验证和测试标签不参与权重计算。冒烟模式也用完整训练受试者统计权重，而不是只统计等距抽取的少量训练目标。若训练折缺少任一类别，程序会停止并明确报错。类别计数、权重和来源保存到每折的 `training_distribution.json`、`best.pt` 与 `result.json`。为便于与无权重基线比较，应使用新的输出目录，例如 `results/loso_weighted`。
 
 默认参数：序列上限 21，CNN 特征 32，单层单向 RNN 隐藏维度 32，batch 8，Adam lr `0.001`，交叉熵，梯度范数裁剪 1，seed 42，最多 30 轮，5 轮验证 Macro-F1 不提升早停，同分保留较早模型。默认 0 个 DataLoader worker、2 个 CPU 线程以控制内存。可通过 `--help` 查看参数。
 
@@ -47,7 +51,7 @@ python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../spl
 
 - `run.json`：配置、源码哈希、数据摘要、环境；`manifest.json`：逐文件 SHA256 与窗口标识。
 - `status.json`：当前折、轮次、训练步骤或完成/失败状态；`summary.json`、`REPORT.md`：逐折与合并结果，训练期间逐折更新。
-- 每折目录：`split.json`、`normalizer.json`、`history.json`、`best.pt`、`predictions.csv`、`result.json`。
+- 每折目录：`split.json`、`normalizer.json`、`training_distribution.json`、`history.json`、`best.pt`、`predictions.csv`、`result.json`。
 - CSV 包含受试者、窗口编号、首末采样时间、真实标签、预测类别及 `p0`–`p3`。`end` 是最后一个原始采样点时间，不是半开窗口右端点。
 - 固定四类计算 Accuracy、Balanced Accuracy、Macro-F1、Cohen κ、每类 Precision/Recall（Sensitivity）/Specificity/F1/支持数及混淆矩阵（行真值、列预测）。固定四类平均时缺失类 Recall/F1 为 0；κ 分母为 0 时记 null。折间统计采用总体标准差，κ 忽略不可定义折并报告有效折数。合并指标从所有逐窗口预测重新计算。
 

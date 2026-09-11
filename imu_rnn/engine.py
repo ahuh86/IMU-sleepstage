@@ -41,32 +41,37 @@ class BestTracker:
         return self.stale >= self.patience
 
 
-def train_epoch(model, loader, optimizer, device, progress=None):
+def train_epoch(model, loader, optimizer, device, progress=None, criterion=None):
     model.train()
-    total_loss, count, correct = 0., 0, 0
+    criterion = criterion or torch.nn.CrossEntropyLoss()
+    total_loss, loss_denominator, count, correct = 0., 0., 0, 0
     started = time.monotonic()
     for step, (x, lengths, y, _) in enumerate(loader, 1):
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad(set_to_none=True)
         logits = model(x, lengths)
-        loss = torch.nn.functional.cross_entropy(logits, y)
+        loss = criterion(logits, y)
         if not torch.isfinite(loss):
             raise RuntimeError('Non-finite training loss')
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=True)
         optimizer.step()
         n = len(y)
-        total_loss += float(loss.detach()) * n
+        criterion_weight = getattr(criterion, 'weight', None)
+        batch_denominator = (float(criterion_weight[y].sum())
+                             if criterion_weight is not None else n)
+        total_loss += float(loss.detach()) * batch_denominator
+        loss_denominator += batch_denominator
         correct += int((logits.argmax(1) == y).sum())
         count += n
         if progress:
             progress(dict(step=step, total_steps=len(loader), samples=count,
-                          loss=total_loss/count, batch_loss=float(loss.detach()),
+                          loss=total_loss/loss_denominator, batch_loss=float(loss.detach()),
                           accuracy=correct/count, lr=optimizer.param_groups[0]['lr'],
                           elapsed_seconds=time.monotonic()-started))
     if not count:
         raise ValueError('Empty training loader')
-    return dict(loss=total_loss/count, accuracy=correct/count, n=count,
+    return dict(loss=total_loss/loss_denominator, accuracy=correct/count, n=count,
                 seconds=time.monotonic()-started)
 
 
