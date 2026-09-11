@@ -27,7 +27,7 @@ def fixture_data(root):
 
 
 def fixture_class_weight_data(root):
-    labels = {'a': [0, 0, 0, 0], 'b': [1, 1, 1, 1], 'c': [0, 1, 2, 3]}
+    labels = {'a': [0, 0, 0, 0], 'b': [1, 1, 1, 1], 'c': [0, 0, 1, 2, 3]}
     for subject, subject_labels in labels.items():
         folder = root / subject / '10s-step'
         folder.mkdir(parents=True)
@@ -119,34 +119,51 @@ def test_invalid_config_does_not_start_run(tmp_path):
     with pytest.raises(ValueError):
         run_experiment(Config(data_root=str(tmp_path), output_dir=str(tmp_path/'out'), epochs=0))
     assert not (tmp_path/'out').exists()
+    with pytest.raises(ValueError, match='either full or square-root'):
+        Config(data_root=str(tmp_path), output_dir=str(tmp_path/'other'),
+               use_class_weight=True, use_sqrt_class_weight=True).validate()
 
 
-def test_weighted_fold_records_training_only_distribution(tmp_path):
+def test_sqrt_weighted_fold_records_training_only_distribution(tmp_path):
     torch.set_num_threads(2)
     fixture_class_weight_data(tmp_path/'data')
     config = Config(
         data_root=str(tmp_path/'data'), output_dir=str(tmp_path/'run'),
         cache_dir=str(tmp_path/'cache'), test_subject='a', epochs=1,
-        batch_size=2, seq_len=2, device='cpu', use_class_weight=True,
+        batch_size=2, seq_len=2, device='cpu', use_sqrt_class_weight=True,
     )
 
     summary = run_experiment(config)
 
-    expected = {
-        'strategy': 'inverse_frequency_class_weight',
-        'formula': 'N / (4 * class_count)',
-        'class_order': ['Wake', 'Light', 'Deep', 'REM'],
-        'class_counts': [1, 1, 1, 1],
-        'class_weights': [1., 1., 1., 1.],
-        'source': 'complete training-subject records only',
-    }
     saved = json.loads((tmp_path/'run'/'a'/'training_distribution.json').read_text())
     checkpoint = torch.load(tmp_path/'run'/'a'/'best.pt', map_location='cpu', weights_only=True)
-    assert saved == expected
-    assert checkpoint['imbalance'] == expected
-    assert summary['folds'][0]['imbalance'] == expected
+    assert saved['strategy'] == 'sqrt_inverse_frequency_class_weight'
+    assert saved['formula'] == '(N / (4 * class_count)) ** 0.5'
+    assert saved['power'] == .5
+    assert saved['class_counts'] == [2, 1, 1, 1]
+    assert saved['class_weights'] == pytest.approx([.625 ** .5, 1.25 ** .5, 1.25 ** .5, 1.25 ** .5])
+    assert checkpoint['imbalance'] == saved
+    assert summary['folds'][0]['imbalance'] == saved
     assert summary['folds'][0]['split'] == {'train': ['c'], 'val': ['b'], 'test': ['a']}
     (tmp_path/'run'/'a'/'training_distribution.json').unlink()
     config.resume = True
     with pytest.raises(ValueError, match='training distribution'):
         run_experiment(config)
+
+
+def test_full_inverse_weighting_remains_available(tmp_path):
+    torch.set_num_threads(2)
+    fixture_class_weight_data(tmp_path/'data')
+    summary = run_experiment(Config(
+        data_root=str(tmp_path/'data'), output_dir=str(tmp_path/'run'),
+        cache_dir=str(tmp_path/'cache'), test_subject='a', epochs=1,
+        batch_size=2, seq_len=2, device='cpu', use_class_weight=True,
+    ))
+
+    saved = json.loads((tmp_path/'run'/'a'/'training_distribution.json').read_text())
+    assert saved['strategy'] == 'inverse_frequency_class_weight'
+    assert saved['formula'] == 'N / (4 * class_count)'
+    assert saved['power'] == 1.
+    assert saved['class_counts'] == [2, 1, 1, 1]
+    assert saved['class_weights'] == pytest.approx([.625, 1.25, 1.25, 1.25])
+    assert summary['folds'][0]['imbalance'] == saved

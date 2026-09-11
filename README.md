@@ -10,9 +10,11 @@
 python -m pytest -q
 python train_loso.py --smoke --device cuda --output-dir results/smoke_gpu
 python train_loso.py --smoke --device cuda --use-class-weight --output-dir results/weighted_smoke_gpu
+python train_loso.py --smoke --device cuda --use-sqrt-class-weight --output-dir results/sqrt_weighted_smoke_gpu
 python train_loso.py --test-subject LIHongmei --device cuda --output-dir results/single
 python -u train_loso.py --all-subjects --device cuda --output-dir results/loso_live
 python -u train_loso.py --all-subjects --device cuda --use-class-weight --output-dir results/loso_weighted
+python -u train_loso.py --all-subjects --device cuda --use-sqrt-class-weight --output-dir results/loso_sqrt_weighted
 python -u train_loso.py --all-subjects --device cuda --output-dir results/loso_live --resume
 python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../split-data --subjects LIHongmei --output-csv results/inference.csv --device cuda
 ```
@@ -39,7 +41,7 @@ python predict.py --checkpoint results/loso/LIHongmei/best.pt --data-root ../spl
 
 归一化仅使用该折训练受试者的通道均值和标准差；标准差小于 `1e-8` 的通道使用 1。所有训练目标每轮遍历一次，随机打乱；不做前缀截取或均衡采样。
 
-性能优先配置使用 `--use-class-weight` 开启按折类别加权交叉熵。权重只由该折完整训练受试者统计，公式为 `N / (4 * n_c)`；验证和测试标签不参与权重计算。冒烟模式也用完整训练受试者统计权重，而不是只统计等距抽取的少量训练目标。若训练折缺少任一类别，程序会停止并明确报错。类别计数、权重和来源保存到每折的 `training_distribution.json`、`best.pt` 与 `result.json`。为便于与无权重基线比较，应使用新的输出目录，例如 `results/loso_weighted`。
+类别加权只由该折完整训练受试者统计；验证和测试标签不参与。`--use-class-weight` 使用完整逆频率权重 `N / (4 * n_c)`；`--use-sqrt-class-weight` 使用弱化权重 `sqrt(N / (4 * n_c))`，两者互斥。完整逆频率实验提高了 Deep/REM，但合并 Macro-F1 从 `0.21635` 降至 `0.20545`，因此后续性能配置采用平方根权重。冒烟模式也用完整训练受试者统计权重，而不是只统计等距抽取的训练目标。若训练折缺少任一类别，程序会停止并明确报错。类别计数、公式、指数、权重和来源保存到每折的 `training_distribution.json`、`best.pt` 与 `result.json`。不同权重策略必须使用不同输出目录。
 
 默认参数：序列上限 21，CNN 特征 32，单层单向 RNN 隐藏维度 32，batch 8，Adam lr `0.001`，交叉熵，梯度范数裁剪 1，seed 42，最多 30 轮，5 轮验证 Macro-F1 不提升早停，同分保留较早模型。默认 0 个 DataLoader worker、2 个 CPU 线程以控制内存。可通过 `--help` 查看参数。
 

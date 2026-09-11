@@ -42,6 +42,7 @@ class Config:
     threads: int = 2
     resume: bool = False
     use_class_weight: bool = False
+    use_sqrt_class_weight: bool = False
 
     def validate(self):
         for field in ('epochs', 'batch_size', 'seq_len', 'patience', 'threads'):
@@ -51,6 +52,8 @@ class Config:
             raise ValueError('Invalid learning rate or worker count')
         if self.all_subjects and self.test_subject is not None:
             raise ValueError('Choose either all subjects or one test subject')
+        if self.use_class_weight and self.use_sqrt_class_weight:
+            raise ValueError('Choose either full or square-root class weighting')
         if not self.all_subjects and not self.test_subject and not self.smoke:
             raise ValueError('Specify --all-subjects or --test-subject (or --smoke)')
 
@@ -87,10 +90,19 @@ def run_fold(config, index, subject, output, device, fingerprint, data_digest):
     records = {part: [r for s in names for r in index[s]] for part, names in split.items()}
     normalizer = fit_normalizer(records['train'])
     counts = class_counts(records['train'])
-    weights = inverse_frequency_weights(counts) if config.use_class_weight else None
+    weight_power = .5 if config.use_sqrt_class_weight else (1. if config.use_class_weight else None)
+    weights = inverse_frequency_weights(counts, power=weight_power) if weight_power else None
+    if weight_power == .5:
+        strategy, formula = ('sqrt_inverse_frequency_class_weight',
+                             '(N / (4 * class_count)) ** 0.5')
+    elif weight_power == 1.:
+        strategy, formula = 'inverse_frequency_class_weight', 'N / (4 * class_count)'
+    else:
+        strategy, formula = 'none', None
     loss_setup = dict(
-        strategy='inverse_frequency_class_weight' if config.use_class_weight else 'none',
-        formula='N / (4 * class_count)',
+        strategy=strategy,
+        formula=formula,
+        power=weight_power,
         class_order=['Wake', 'Light', 'Deep', 'REM'],
         class_counts=counts,
         class_weights=weights.tolist() if weights is not None else None,
@@ -217,7 +229,7 @@ def run_experiment(config):
     output.mkdir(parents=True, exist_ok=True)
     print(f'Device: {device} | Batch size: {config.batch_size} | Sequence length: {config.seq_len}\n'
           f'Max epochs: {1 if config.smoke else config.epochs} | LR: {config.lr} | Seed: {config.seed}\n'
-          f'Loss: {"training-fold inverse-frequency weighted cross-entropy" if config.use_class_weight else "cross-entropy"}\n'
+          f'Loss: {"training-fold square-root inverse-frequency weighted cross-entropy" if config.use_sqrt_class_weight else ("training-fold inverse-frequency weighted cross-entropy" if config.use_class_weight else "cross-entropy")}\n'
           f'Data: {Path(config.data_root).resolve()}\nOutput: {output}\n'
           'Preparing data: validating hashes and window cache...', flush=True)
     save_json(output/'status.json', dict(state='indexing', started=datetime.now(timezone.utc).isoformat()))
@@ -263,8 +275,9 @@ def run_experiment(config):
                 saved_checkpoint = torch.load(checkpoint_file, map_location='cpu', weights_only=True)
                 if saved_checkpoint.get('fingerprint') != fingerprint:
                     raise ValueError('Completed fold checkpoint fingerprint mismatch')
-                if saved_checkpoint.get('config', {}).get('use_class_weight') != config.use_class_weight:
-                    raise ValueError('Completed fold checkpoint loss configuration mismatch')
+                for option in ('use_class_weight', 'use_sqrt_class_weight'):
+                    if saved_checkpoint.get('config', {}).get(option, False) != getattr(config, option):
+                        raise ValueError('Completed fold checkpoint loss configuration mismatch')
                 if (result.get('imbalance') != saved_distribution or
                         saved_checkpoint.get('imbalance') != saved_distribution):
                     raise ValueError('Completed fold training distribution mismatch')

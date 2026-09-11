@@ -18,7 +18,19 @@ def test_training_record_counts_and_inverse_frequency_weights():
     torch.testing.assert_close(weights * torch.tensor(counts), torch.full((4,), 15 / 4))
 
 
-@pytest.mark.parametrize('counts', ([8, 4, 2, 0], [1, 2, 3], [1, 2, 3, -1]))
-def test_inverse_frequency_weights_reject_invalid_counts(counts):
+def test_square_root_weakens_inverse_frequency_ratios():
+    full = inverse_frequency_weights([8, 4, 2, 1])
+    weakened = inverse_frequency_weights([8, 4, 2, 1], power=.5)
+
+    torch.testing.assert_close(weakened, full.sqrt())
+    assert weakened[-1] / weakened[0] < full[-1] / full[0]
+
+
+@pytest.mark.parametrize(
+    ('counts', 'power'),
+    [([8, 4, 2, 0], 1.), ([1, 2, 3], 1.), ([1, 2, 3, -1], 1.),
+     ([8, 4, 2, 1], 0.), ([8, 4, 2, 1], 1.1)],
+)
+def test_inverse_frequency_weights_reject_invalid_inputs(counts, power):
     with pytest.raises(ValueError):
-        inverse_frequency_weights(counts)
+        inverse_frequency_weights(counts, power=power)

@@ -13,14 +13,16 @@ def class_counts(records, num_classes=4):
     return counts
 
 
-def inverse_frequency_weights(counts, num_classes=4):
-    """Return N / (C * n_c), whose sample-weighted mean is one."""
+def inverse_frequency_weights(counts, num_classes=4, power=1.):
+    """Return (N / (C * n_c)) ** power; power=.5 softens class ratios."""
     if len(counts) != num_classes or any(
             not isinstance(count, int) or isinstance(count, bool) or count <= 0
             for count in counts):
         raise ValueError(f'All {num_classes} classes need a positive integer training count')
+    if not isinstance(power, (int, float)) or isinstance(power, bool) or not 0 < power <= 1:
+        raise ValueError('Class-weight power must be in (0, 1]')
     total = sum(counts)
     return torch.tensor(
-        [total / (num_classes * count) for count in counts],
+        [(total / (num_classes * count)) ** power for count in counts],
         dtype=torch.float32,
     )
